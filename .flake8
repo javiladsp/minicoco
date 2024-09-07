@@ -1,0 +1,5 @@
+[flake8]
+; ignore = E226,E302,E41
+max-line-length = 280
+exclude = .git,__pycache__,docs/source/conf.py,old,build,dist
+per-file-ignores = __init__.py:F401
