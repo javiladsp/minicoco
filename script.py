@@ -41,6 +41,13 @@ parser.add_argument("-f", "--format", type=str,
                     choices=["coco", "yolo"],
                     default="coco")
 
+parser.add_argument("-ad", "--auto-distribution", type=str,
+                    help="""Auto distribution of the images in the training and validation set.
+                    e.g., 80/20, 80% of the images for the training set and 20% for the validation set.
+                    This will use only the train subset from the COCO dataset,
+                    because the validation set is not completed.""",
+                    default="")
+
 parser.add_argument("-anylabel", "--anylabel", type=bool,
                     help="Create a label file for each image for the AnyLabel tool.",
                     default=True)
@@ -59,7 +66,7 @@ parser.add_argument("-l", "--local", type=str,
 
 args = parser.parse_args()
 
-ROOT_PATH = os.path.join(args.destination, "dataset")
+ROOT_PATH = os.path.join(args.destination)
 TRAIN_IMAGES_PATH = f"{ROOT_PATH}/train/images"
 TRAIN_LABELS_PATH = f"{ROOT_PATH}/train/labels"
 VAL_IMAGES_PATH = f"{ROOT_PATH}/val/images"
@@ -72,7 +79,16 @@ Path(VAL_IMAGES_PATH).mkdir(parents=True, exist_ok=True)
 Path(VAL_LABELS_PATH).mkdir(parents=True, exist_ok=True)
 
 
-def process_subset(annotation_file, num_images, subset_name):
+def process_subset(annotation_file, num_images, subset_name, original_subset_name=None, last_num_images=None):
+    """
+    Process a subset of the COCO dataset.
+    Parameters:
+    annotation_file (str): The path to the COCO annotation file.
+    num_images (int): The number of images to process.
+    subset_name (str): The name of the subset.
+    original_subset_name (str, optional): train or val. If this is not none, the images will be copied from the specified original subset. Defaults to None.
+    last_num_images (int, optional): The number of images used in the original subset. Defaults to None.
+    """
     coco = COCO(annotation_file)
     catNms = args.categories
     catIds = coco.getCatIds(catNms)
@@ -81,11 +97,27 @@ def process_subset(annotation_file, num_images, subset_name):
     imgOriginals = coco.loadImgs(imgIds)
     imgShuffled = sample(imgOriginals, len(imgOriginals))
 
-    def myImages(images: list, num: int) -> list:
-        if num == -1:
-            return images
+    # if original_subset_name is not None:
+    #     subset_name = original_subset_name
 
-        return images[:num]
+    def myImages(images: list, start_index: int = None, end_index: int = None) -> list:
+        """
+        Returns a sublist of images from start_index to end_index.
+
+        Parameters:
+        images (list): The list of images.
+        start_index (int, optional): The starting index of the sublist. Defaults to 0 if not provided.
+        end_index (int, optional): The ending index of the sublist. Defaults to the length of the images list if not provided.
+
+        Returns:
+        list: A sublist of images from start_index to end_index.
+        """
+        if start_index is None:
+            start_index = 0
+        if end_index is None:
+            end_index = len(images)
+
+        return images[start_index:end_index]
 
     def cocoJson(images: list) -> dict:
         '''getCatIds return a sorted list of id.
@@ -131,45 +163,48 @@ def process_subset(annotation_file, num_images, subset_name):
         image_dict = {img["id"]: img for img in images}
 
         with alive_bar(len(anns), title="Formatting annotations...") as bar:
-            for i, ann in enumerate(anns):
-                image = image_dict[ann["image_id"]]
-                img_width = image["width"]
-                img_height = image["height"]
-                image_file_name = image["file_name"]
-                file_name = os.path.splitext(image_file_name)[0]
+            try:
+                for i, ann in enumerate(anns):
+                    image = image_dict[ann["image_id"]]
+                    img_width = image["width"]
+                    img_height = image["height"]
+                    image_file_name = image["file_name"]
+                    file_name = os.path.splitext(image_file_name)[0]
 
-                # COCO bbox format: [x, y, width, height]
-                x, y, coco_width, coco_height = ann["bbox"]
+                    # COCO bbox format: [x, y, width, height]
+                    x, y, coco_width, coco_height = ann["bbox"]
 
-                if any(dim is None or dim == 0 for dim in (coco_width, coco_height)):
-                    continue
+                    if any(dim is None or dim == 0 for dim in (coco_width, coco_height)):
+                        continue
 
-                coco_bbox = BoundingBox.from_coco(x, y, coco_width, coco_height, image_size=(img_width, img_height))
-                x_center, y_center, width, height = coco_bbox.to_yolo(return_values=True)
+                    coco_bbox = BoundingBox.from_coco(x, y, coco_width, coco_height, image_size=(img_width, img_height))
+                    x_center, y_center, width, height = coco_bbox.to_yolo(return_values=True)
 
-                yolo_annotations.append({
-                    "image_id": ann["image_id"],
-                    "file_name": file_name,
-                    "category_id": catIds.index(ann["category_id"]),
-                    "bbox": {
-                        "yolo": {
-                            "x_center": x_center,
-                            "y_center": y_center,
-                            "width": width,
-                            "height": height
-                        },
-                        "coco": {
-                            "x": x,
-                            "y": y,
-                            "width": coco_width,
-                            "height": coco_height
+                    yolo_annotations.append({
+                        "image_id": ann["image_id"],
+                        "file_name": file_name,
+                        "category_id": catIds.index(ann["category_id"]),
+                        "bbox": {
+                            "yolo": {
+                                "x_center": x_center,
+                                "y_center": y_center,
+                                "width": width,
+                                "height": height
+                            },
+                            "coco": {
+                                "x": x,
+                                "y": y,
+                                "width": coco_width,
+                                "height": coco_height
+                            }
                         }
-                    }
-                })
+                    })
 
-                # Update the progress bar less frequently
-                # if i % 100 == 0:
-                bar()
+                    # Update the progress bar less frequently
+                    # if i % 100 == 0:
+                    bar()
+            except Exception as e:
+                print(e)
 
         # TODO: Check id categories
         cats = [{'id': int(value) - 1, 'name': key}
@@ -280,7 +315,9 @@ def process_subset(annotation_file, num_images, subset_name):
     def copy_image(image, local_path, images_path):
         src_path = os.path.join(local_path, image['file_name'])
         dest_path = os.path.join(images_path, image['file_name'])
-        shutil.copy2(src_path, dest_path)
+
+        if not os.path.exists(dest_path):
+            shutil.copy2(src_path, dest_path)
 
     def copyImages(images: list, local_path: str, title: str) -> None:
         images_path = f"{ROOT_PATH}/{subset_name}/images"
@@ -317,10 +354,36 @@ def process_subset(annotation_file, num_images, subset_name):
                     future.result()  # Ensure any exceptions are raised
                     bar()
 
-    images = myImages(imgShuffled, num_images)
+    initial_index = 0
+    if args.auto_distribution != "":
+        distribution = args.auto_distribution.split("/")
+        training_percent = int(distribution[0])  # percent for the training set
+        validation_percent = int(distribution[1])  # percent for the validation set
+        num_images = len(imgOriginals)
+
+        total_train_images = int(num_images * (training_percent / 100))
+        total_val_images = int(num_images * (validation_percent / 100))
+
+        total_images = total_train_images
+        if original_subset_name is not None:
+            total_images = total_val_images
+            initial_index = total_train_images
+
+        images = myImages(imgOriginals, initial_index, initial_index + total_images)
+    else:
+        if last_num_images is not None:
+            initial_index = last_num_images
+
+        if num_images == -1:
+            num_images = None
+            initial_index = None
+
+        images = myImages(imgShuffled, initial_index, num_images)
 
     if args.local != "":
         local = os.path.join(args.local, "dataset", subset_name, "images")
+        if original_subset_name is not None:
+            local = os.path.join(args.local, "dataset", original_subset_name, "images")
         copyImages(images, local, title=f"Copying images of the {subset_name} set:")
     else:
         downloadImages(images, title=f'Downloading images of the {subset_name} set:')
@@ -341,4 +404,7 @@ def process_subset(annotation_file, num_images, subset_name):
 
 
 process_subset(args.train_annotation_file, args.training, "train")
-process_subset(args.val_annotation_file, args.validation, "val")
+if args.auto_distribution != "":
+    process_subset(args.train_annotation_file, args.validation, "val", "train", args.training)
+else:
+    process_subset(args.val_annotation_file, args.validation, "val")
